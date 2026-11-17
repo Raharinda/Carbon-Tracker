@@ -38,6 +38,10 @@ yarn-error.*
 
 example
 
+# firmware
+apps/firmware/**/secrets.h
+apps/firmware/**/.pio/
+
 # generated native folders
-/ios
-/android
+apps/mobile/ios
+apps/mobile/android

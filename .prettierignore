@@ -1,0 +1,7 @@
+node_modules
+dist
+.expo
+example
+assets
+apps/firmware
+package-lock.json
