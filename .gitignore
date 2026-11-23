@@ -41,6 +41,8 @@ example
 # firmware
 apps/firmware/**/secrets.h
 apps/firmware/**/.pio/
+apps/firmware/**/.vscode/
+.vscode/c_cpp_properties.json
 
 # generated native folders
 apps/mobile/ios

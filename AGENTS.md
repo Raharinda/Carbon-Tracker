@@ -36,6 +36,8 @@ npx expo install --fix      # fix incompatible package versions
 
 Run lint and typecheck before declaring any task done.
 
+Never run `npx expo start` from the repository root: Expo treats the monorepo root as the project, fails with `Unable to resolve "../../App"`, and writes a stray root `tsconfig.json`. Use `npm start`, or `cd apps/mobile` first.
+
 ## Navigation & Routing
 
 - Use **Expo Router** for all navigation. Routes live in `apps/mobile/src/app/` — every file there is a screen, `_layout.tsx` files define navigators. Keep non-route code (components, hooks, utils) outside `src/app/`.

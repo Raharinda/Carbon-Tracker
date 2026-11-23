@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getApps, initializeApp } from "firebase/app";
-import { Auth, initializeAuth, Persistence } from "firebase/auth";
+import { Auth, getAuth, initializeAuth, Persistence } from "firebase/auth";
 import { Database, getDatabase } from "firebase/database";
 import { Firestore, getFirestore } from "firebase/firestore";
 
@@ -53,9 +53,17 @@ function createReactNativePersistence(storage: typeof AsyncStorage): Persistence
   } as unknown as Persistence;
 }
 
-export const auth: Auth = initializeAuth(app, {
-  persistence: createReactNativePersistence(AsyncStorage),
-});
+let auth: Auth;
+try {
+  auth = initializeAuth(app, {
+    persistence: createReactNativePersistence(AsyncStorage),
+  });
+} catch {
+  // Fast Refresh re-evaluates this module after auth is already registered on app.
+  auth = getAuth(app);
+}
+
+export { auth };
 
 export const database: Database = getDatabase(app);
 export const firestore: Firestore = getFirestore(app);

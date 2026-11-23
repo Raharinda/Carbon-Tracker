@@ -19,7 +19,7 @@ function AppBootstrap() {
   const deviceId = useDeviceId();
   const isAuthenticated = status === "authenticated";
 
-  useSettingsBootstrap(status !== "loading");
+  useSettingsBootstrap(isAuthenticated);
   useDeviceStream(deviceId, isAuthenticated);
   useEnergyHistory(deviceId, isAuthenticated);
   useUsageRecording(deviceId, isAuthenticated);

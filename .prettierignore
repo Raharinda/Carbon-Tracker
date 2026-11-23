@@ -4,4 +4,5 @@ dist
 example
 assets
 apps/firmware
+.vscode/c_cpp_properties.json
 package-lock.json

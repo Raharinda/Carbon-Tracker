@@ -17,6 +17,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
+#include <optional>
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -33,46 +34,67 @@ const String DEVICE_PATH = String("/devices/") + DEVICE_ID;
 const unsigned long READ_INTERVAL = 2000;
 const unsigned long PUSH_INTERVAL = 4000;
 const unsigned long POLL_INTERVAL = 2000;
-const unsigned long RELAY_REQUEST_TIMEOUT = 10000;
+const unsigned long REQUEST_TIMEOUT = 10000;
+const unsigned long INIT_RETRY_DELAY = 5000;
+const unsigned long LOCAL_CMD_POLL_HOLD = 5000;
 
-PZEM004Tv30 pzem(Serial2, PZEM_RX_PIN, PZEM_TX_PIN);
+// Inisialisasi di setup() setelah Serial2 siap (ESP32 Arduino core 3.x).
+std::optional<PZEM004Tv30> pzem;
 WiFiManager wm;
 
 UserAuth user_auth(API_KEY, USER_EMAIL, USER_PASS);
 FirebaseApp app;
-WiFiClientSecure ssl_client; // auth dan kirim data PZEM
-WiFiClientSecure ssl_ctrl;   // khusus kontrol relay
+WiFiClientSecure ssl_client;
 using AsyncClient = AsyncClientClass;
 AsyncClient aClient(ssl_client);
-AsyncClient ctrlClient(ssl_ctrl);
 RealtimeDatabase Database;
 
 bool fbStarted = false;
 bool initSent = false;
+bool initRetryWait = false;
 bool relaySynced = false;
 bool fbReadyPrinted = false;
 bool wasConnected = false;
 bool hasReading = false;
+bool relayOn = false;
 bool getPending = false;
+bool pushPending = false;
+bool pollBlocked = false;
 
 float g_v = 0, g_i = 0, g_p = 0, g_e = 0, g_f = 0, g_pf = 0;
 
 unsigned long lastRead = 0, lastPush = 0, lastPoll = 0;
-unsigned long pollBlockedUntil = 0, getSentAt = 0;
+unsigned long localCmdAt = 0, getSentAt = 0, pushSentAt = 0, initFailedAt = 0;
 
 void processData(AsyncResult &aResult);
 
+bool isWifiConnected() { return WiFi.status() == WL_CONNECTED; }
+
+bool isPollBlocked() {
+  if (!pollBlocked) return false;
+  if (millis() - localCmdAt >= LOCAL_CMD_POLL_HOLD) {
+    pollBlocked = false;
+    return false;
+  }
+  return true;
+}
+
 void applyRelay(bool on, bool pushCommand) {
+  relayOn = on;
   digitalWrite(RELAY_PIN, on ? HIGH : LOW); // HIGH = ON, LOW = OFF
   Serial.println(on ? "Relay: ON" : "Relay: OFF");
 
-  if (app.ready() && relaySynced) {
+  if (pushCommand) {
+    pollBlocked = true;
+    localCmdAt = millis(); // cegah poll/respon lama menimpa perintah lokal
+  }
+
+  if (isWifiConnected() && app.ready() && relaySynced) {
     if (pushCommand) {
-      pollBlockedUntil = millis() + 5000; // cegah poll menimpa perintah lokal
-      Database.set<bool>(ctrlClient, DEVICE_PATH + "/relay", on, processData, "setRelay");
+      Database.set<bool>(aClient, DEVICE_PATH + "/relay", on, processData, "setRelay");
     }
     // Umpan balik: status relay yang benar-benar terpasang.
-    Database.set<bool>(ctrlClient, DEVICE_PATH + "/relayState", on, processData, "setState");
+    Database.set<bool>(aClient, DEVICE_PATH + "/relayState", on, processData, "setState");
   }
 }
 
@@ -80,25 +102,40 @@ void processData(AsyncResult &aResult) {
   if (!aResult.isResult()) return;
 
   String uid = aResult.uid();
-  if (uid == "getRelay") getPending = false;
+
+  if (aResult.isEvent()) {
+    if (uid == "authTask" || aResult.eventLog().code() == auth_event_error) {
+      Firebase.printf("Firebase event [%s]: %s (%d)\n", uid.c_str(),
+                      aResult.eventLog().message().c_str(), aResult.eventLog().code());
+    }
+  }
 
   if (aResult.isError()) {
+    if (uid == "getRelay") getPending = false;
+    else if (uid == "pushReadings") pushPending = false;
+    else if (uid == "initRelay") {
+      initSent = false;
+      initRetryWait = true;
+      initFailedAt = millis();
+    }
     Firebase.printf("Firebase error [%s]: %s (%d)\n", uid.c_str(),
                     aResult.error().message().c_str(), aResult.error().code());
-    if (uid == "initRelay") initSent = false; // coba lagi
     return;
   }
 
   if (aResult.available()) {
+    if (uid == "getRelay") getPending = false;
+    else if (uid == "pushReadings") pushPending = false;
+
     String payload = aResult.c_str();
     payload.trim();
 
     if (uid == "initRelay") {
       relaySynced = true;
       Serial.println("Firebase: relay disinkronkan");
-    } else if (uid == "getRelay") {
-      if (payload == "true" && digitalRead(RELAY_PIN) == LOW) applyRelay(true, false);
-      else if (payload == "false" && digitalRead(RELAY_PIN) == HIGH) applyRelay(false, false);
+    } else if (uid == "getRelay" && !isPollBlocked()) {
+      if (payload == "true" && !relayOn) applyRelay(true, false);
+      else if (payload == "false" && relayOn) applyRelay(false, false);
     }
   }
 }
@@ -106,7 +143,9 @@ void processData(AsyncResult &aResult) {
 void startFirebase() {
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   ssl_client.setInsecure(); // tahap pengembangan; gunakan root CA untuk produksi
-  ssl_ctrl.setInsecure();
+  ssl_client.setConnectionTimeout(5000);
+  ssl_client.setHandshakeTimeout(5);
+  aClient.setNetworkStatusCallback(isWifiConnected);
   initializeApp(aClient, app, getAuth(user_auth), processData, "authTask");
   app.getApp<RealtimeDatabase>(Database);
   Database.url(DATABASE_URL);
@@ -115,7 +154,7 @@ void startFirebase() {
 }
 
 void pushReadings() {
-  if (!app.ready() || !relaySynced || !hasReading) return;
+  if (!isWifiConnected() || !app.ready() || !relaySynced || !hasReading || pushPending) return;
 
   String json = "{";
   json += "\"voltage\":" + String(g_v, 1);
@@ -128,23 +167,28 @@ void pushReadings() {
   if (now > 1700000000) json += ",\"ts\":" + String((uint32_t)now);
   json += "}";
 
+  pushPending = true;
+  pushSentAt = millis();
   Database.set<object_t>(aClient, DEVICE_PATH + "/readings", object_t(json), processData,
                          "pushReadings");
 }
 
 void readPzem() {
-  float voltage = pzem.voltage();
+  // Buang sisa byte UART agar frame Modbus 25 byte tidak desync.
+  while (Serial2.available()) Serial2.read();
+
+  float voltage = pzem->voltage();
   if (isnan(voltage)) {
     hasReading = false;
     Serial.println("PZEM: tidak ada respon (cek 5V PZEM, TX/RX, dan AC)");
     return;
   }
 
-  float current = pzem.current();
-  float power = pzem.power();
-  float energy = pzem.energy();
-  float frequency = pzem.frequency();
-  float pf = pzem.pf();
+  float current = pzem->current();
+  float power = pzem->power();
+  float energy = pzem->energy();
+  float frequency = pzem->frequency();
+  float pf = pzem->pf();
 
   g_v = voltage;
   g_i = isnan(current) ? 0 : current;
@@ -174,7 +218,7 @@ void handleCommand() {
   } else if (c == "OFF") {
     applyRelay(false, true);
   } else if (c == "WIFI") {
-    if (WiFi.status() == WL_CONNECTED) {
+    if (isWifiConnected()) {
       Serial.printf("WiFi: %s, IP %s, sinyal %d dBm\n", WiFi.SSID().c_str(),
                     WiFi.localIP().toString().c_str(), WiFi.RSSI());
     } else {
@@ -192,9 +236,12 @@ void handleCommand() {
 
 void setup() {
   Serial.begin(115200);
+  Serial.setTimeout(50);
 
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW); // default OFF
+
+  pzem.emplace(Serial2, PZEM_RX_PIN, PZEM_TX_PIN);
 
   WiFi.mode(WIFI_STA);
   wm.setConfigPortalBlocking(false);
@@ -213,12 +260,15 @@ void loop() {
   wm.process();
   handleCommand();
 
-  bool connected = (WiFi.status() == WL_CONNECTED);
+  bool connected = isWifiConnected();
   if (connected && !wasConnected) {
     Serial.print("WiFi: tersambung. IP: ");
     Serial.println(WiFi.localIP());
   } else if (!connected && wasConnected) {
     Serial.println("WiFi: terputus");
+    getPending = false;
+    pushPending = false;
+    if (!relaySynced) initSent = false;
   }
   wasConnected = connected;
 
@@ -226,31 +276,31 @@ void loop() {
 
   if (fbStarted) {
     app.loop();
-    Database.loop();
 
-    if (app.ready()) {
+    if (connected && app.ready()) {
       if (!fbReadyPrinted) {
         fbReadyPrinted = true;
         Serial.println("Firebase: siap");
       }
 
       // Saat boot, Firebase disamakan dengan kondisi relay sebenarnya (default OFF).
-      if (!initSent) {
+      if (!initSent && (!initRetryWait || millis() - initFailedAt >= INIT_RETRY_DELAY)) {
         initSent = true;
-        bool cur = (digitalRead(RELAY_PIN) == HIGH);
-        Database.set<bool>(ctrlClient, DEVICE_PATH + "/relayState", cur, processData, "initState");
-        Database.set<bool>(ctrlClient, DEVICE_PATH + "/relay", cur, processData, "initRelay");
+        initRetryWait = false;
+        Database.set<bool>(aClient, DEVICE_PATH + "/relayState", relayOn, processData, "initState");
+        Database.set<bool>(aClient, DEVICE_PATH + "/relay", relayOn, processData, "initRelay");
       }
 
-      if (getPending && millis() - getSentAt > RELAY_REQUEST_TIMEOUT) getPending = false;
+      if (getPending && millis() - getSentAt > REQUEST_TIMEOUT) getPending = false;
+      if (pushPending && millis() - pushSentAt > REQUEST_TIMEOUT) pushPending = false;
 
       // Cek perintah relay dari Firebase.
-      if (relaySynced && !getPending && millis() > pollBlockedUntil &&
+      if (relaySynced && !getPending && !isPollBlocked() &&
           millis() - lastPoll >= POLL_INTERVAL) {
         lastPoll = millis();
         getPending = true;
         getSentAt = millis();
-        Database.get(ctrlClient, DEVICE_PATH + "/relay", processData, false, "getRelay");
+        Database.get(aClient, DEVICE_PATH + "/relay", processData, false, "getRelay");
       }
     }
   }

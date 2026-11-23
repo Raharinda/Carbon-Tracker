@@ -9,7 +9,7 @@ export function isSnapshotLive(
   now: number,
   thresholdMs = LIVE_DATA_THRESHOLD_MS,
 ): boolean {
-  if (snapshot === null) return false;
+  if (snapshot === null || snapshot.reading === null) return false;
   return now - snapshot.receivedAt < thresholdMs;
 }
 

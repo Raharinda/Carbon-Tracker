@@ -42,6 +42,8 @@ npx expo install <package>   # resolves SDK-compatible versions
 npx expo start -c            # start with a cleared cache
 ```
 
+> Do **not** run `npx expo start` from the repository root. Expo would treat the monorepo root as the project, fail to resolve the app entry (`Unable to resolve "../../App"`), and auto-generate a stray `tsconfig.json`. Use `npm start`, or `cd apps/mobile` first.
+
 The app runs **without hardware** by default: `EXPO_PUBLIC_DEVICE_SOURCE=mock` streams simulated readings, and the login screen offers **Explore with demo data**.
 
 To use the real device:

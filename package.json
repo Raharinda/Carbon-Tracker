@@ -16,9 +16,9 @@
     "test:watch": "npm run test:watch --workspace @carbon-tracker/mobile --",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "firmware:build": "pio -d apps/firmware/esp32-carbon-tracker run",
-    "firmware:upload": "pio -d apps/firmware/esp32-carbon-tracker run --target upload",
-    "firmware:monitor": "pio -d apps/firmware/esp32-carbon-tracker device monitor"
+    "firmware:build": "pio run -d apps/firmware/esp32-carbon-tracker",
+    "firmware:upload": "pio run -d apps/firmware/esp32-carbon-tracker --target upload",
+    "firmware:monitor": "pio device monitor -d apps/firmware/esp32-carbon-tracker"
   },
   "devDependencies": {
     "prettier": "^3.10.1",

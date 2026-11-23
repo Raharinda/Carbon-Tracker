@@ -81,19 +81,21 @@ export class FirebaseDeviceRepository implements DeviceRepository {
   ): Unsubscribe {
     let reading: DeviceReading | null = null;
     let relayOn = false;
+    let receivedAt = 0;
 
     const emit = () =>
       onSnapshotValue({
         deviceId,
         reading,
         relayOn,
-        receivedAt: Date.now(),
+        receivedAt,
       });
 
     const stopReadings = onValue(
       ref(database, `devices/${deviceId}/readings`),
       (snapshot) => {
         reading = parseReading(snapshot.val());
+        receivedAt = reading ? reading.recordedAt : 0;
         emit();
       },
       (reason) => onError(toDeviceError(reason)),
